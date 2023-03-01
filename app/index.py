@@ -1,8 +1,15 @@
+import datetime
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick # - needs this to customize y-axis
 from flask import current_app, render_template
-from .data import fake_data, format_data_frame
+from .data import (
+    calc_return,
+    format_data_frame,
+    get_price_data
+)
+
 from .util import css_variables
 from io import BytesIO
 
@@ -20,6 +27,7 @@ def plot(prices):
         .fillna(0.0)
         .cumsum()
         .apply(np.exp)
+        .apply(lambda x: x - 1)
     )
 
     return prices.plot()
@@ -43,23 +51,66 @@ def customize_chart(chart):
     for s in chart.spines:
         chart.spines[s].set_color(css['color_2'])
 
+    chart.yaxis.set_major_formatter(mtick.PercentFormatter(1.0)) # --- Y-axis in percentage terms
     return chart
 
 
 @app.route("/")
 def home():
 
-    df = fake_data()
-    _plot = plot(fake_data())
+    symbols = ['SPY', 'EZU', 'IWM', 'EWJ', 'EEM']
+    end = datetime.date.today()
+    start = end - datetime.timedelta(days = 30 * 3)
+
+    df = get_price_data(symbols, start_date = start, end_date = end)
+
+    # --- pass our new data to our plot
+
+    _plot = (
+        df
+        .loc[:, ['date', 'symbol', 'adj_close']]
+        .pivot('date', 'symbol', 'adj_close')
+        .pipe(plot)
+    )
     _plot = customize_chart(_plot)
 
     try:
         chart = export_svg(_plot)
     finally:
-        plt.close() # - close matplotlib window as the chart is already saved in bytes obj
+        plt.close()
+
+    ret_d01 = calc_return(df, index = 1)
+    ret_d21 = calc_return(df, index = 21)
+    prices  = (
+        df[['symbol', 'date', 'adj_close']]
+        .rename(
+            columns = {'adj_close' : 'price'}
+        )
+        .merge(ret_d01.reset_index(), how = 'inner', on = ['date', 'symbol'])
+        .rename(columns = {'ret' : 'daily_return'})
+        .merge(ret_d21.reset_index(), how = 'inner', on = ['date', 'symbol'])
+        .rename(columns = {'ret' : 'monthly_return'})
+    )
+
+    # - styling
+
+    return_cols = ['daily_return', 'monthly_return']
+    def ret_color(x):
+        color = 'tomato' if x < 0 else 'lightgreen'
+        return 'color: %s' % color
+
+    prices = (
+        prices
+        .sort_values('monthly_return', ascending = False)
+        .assign(date = lambda df: df['date'].dt.strftime("%Y-%m-%d"))
+        .pipe(format_data_frame)
+        .format("{:,.2f}", subset = ['price'])
+        .applymap(ret_color, subset = return_cols)
+        .format("{:+,.2%}", subset = return_cols)
+    )
 
     return render_template(
         "index.html",
-        prices = format_data_frame(df).render(),
+        prices = prices.render(),
         chart = chart.getvalue().decode('utf8')
     )
